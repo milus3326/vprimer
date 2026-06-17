@@ -1,0 +1,6 @@
+biopython>=1.87
+httpx>=0.28.1
+pyqt6>=6.11.0
+pyqtdarktheme>=2.1.0
+pyqtgraph>=0.14.0
+python-dotenv>=1.2.2
