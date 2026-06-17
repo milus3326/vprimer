@@ -75,7 +75,7 @@ def group_into_files(taxid: int, rows: list[GeneRow]) -> dict[Path, list[GeneRow
     A CDS with no gene name instead becomes no_gene_name_<accession>_<region>.fasta
     Rows that share a file land in it together.
     """
-    out_dir = Path(__file__).parent / str(taxid)
+    out_dir = Path(__file__).parent / "seqs" / str(taxid)
     groups: dict[Path, list[GeneRow]] = {}
     for row in rows:
         if is_unnamed(row.gene_name):
