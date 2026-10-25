@@ -74,17 +74,23 @@ def group_into_files(taxid: int, rows: list[GeneRow]) -> dict[Path, list[GeneRow
     The directory is the taxid; each named gene becomes <gene>.fasta
     A CDS with no gene name instead becomes no_gene_name_<accession>_<region>.fasta
     Rows that share a file land in it together.
+    Names differing only by case (ORF1a / orf1a) share one file, named after the
+    variant that sorts first, so Windows/macOS (case-insensitive filesystems) and
+    Linux produce the same files instead of one overwriting the other.
     """
     out_dir = Path(__file__).parent / "seqs" / str(taxid)
-    groups: dict[Path, list[GeneRow]] = {}
+    names: dict[str, str] = {}
+    groups: dict[str, list[GeneRow]] = {}
     for row in rows:
         if is_unnamed(row.gene_name):
             range_str = ",".join(f"{b}-{e}" for b, e in row.regions)
             stem = f"no_gene_name_{row.genome_accession}_{range_str}"
         else:
             stem = row.gene_name
-        groups.setdefault(out_dir / f"{stem}.fasta", []).append(row)
-    return groups
+        key = stem.casefold()
+        names[key] = min(names.get(key, stem), stem)
+        groups.setdefault(key, []).append(row)
+    return {out_dir / f"{names[k]}.fasta": g for k, g in groups.items()}
 
 
 def resolve_taxon(query: str) -> Taxon:

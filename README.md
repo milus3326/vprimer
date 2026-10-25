@@ -1,7 +1,5 @@
 ## Installation
 
-Requires **Python ≥ 3.14** and **git**
-
 1. Clone the repository:
   ```bash
    git clone https://github.com/milus3326/vprimer.git
@@ -11,8 +9,7 @@ Requires **Python ≥ 3.14** and **git**
   ```bash
    python -m venv .venv
   ```
-  - Windows: `.\.venv\Scripts\Activate.ps1`
-  - Linux / macOS: `source .venv/bin/activate`
+  - Windows: `.venv\Scripts\activate`
 3. Install dependencies:
   ```bash
    pip install -r requirements.txt

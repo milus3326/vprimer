@@ -37,7 +37,7 @@ from PyQt6.QtWidgets import (
 )
 
 from conservation_graph import ConservationDialog, locate_mafft
-from coverage_graph import CoverageDialog
+from coverage_graph import CoverageDialog, RangeStore
 from download_gene_seq import (
     GeneRow,
     configure_entrez,
@@ -267,6 +267,8 @@ class MainWindow(QMainWindow):
         self._last_out_dir: Path | None = None
         self._coverage_dialog: CoverageDialog | None = None
         self._conservation_dialog: ConservationDialog | None = None
+        # Genome ranges picked on either graph, read by the next pipeline stage
+        self.saved_ranges = RangeStore()
         self._build_ui()
         self._build_worker()
         self._load_env_credentials()
@@ -320,7 +322,7 @@ class MainWindow(QMainWindow):
         self.refseq_only_cb = QCheckBox("RefSeq only")
         self.refseq_only_cb.setChecked(True)
         self.refseq_only_cb.setToolTip(
-            "Only the RefSeq reference genome's genes. Uncheck to search all GenBank genomes."
+            "only the RefSeq reference genome's genes"
         )
         opts_row.addWidget(self.refseq_only_cb)
         opts_row.addSpacing(20)
@@ -331,7 +333,7 @@ class MainWindow(QMainWindow):
         self.complete_only_cb = QCheckBox("Complete only")
         self.complete_only_cb.setChecked(True)
         self.complete_only_cb.setToolTip(
-            "Returns only complete genomes, which drops gene-only / partial deposits. "
+            "Drops gene-only / partial deposits. "
             "Uncheck if a very large taxon makes NCBI return a server error."
         )
         opts_row.addWidget(self.complete_only_cb)
@@ -347,18 +349,15 @@ class MainWindow(QMainWindow):
             "Brazil", "Nigeria", "South Africa", "Japan", "Australia",
             "Africa", "Asia", "Europe", "North America", "South America",
         ])
-        self.geo_combo.setToolTip(
-            "Geographic location (country or region). Blank = any."
-        )
         opts_row2.addWidget(self.geo_combo)
         opts_row2.addSpacing(20)
         opts_row2.addWidget(QLabel("Released since:"))
         self.released_since_edit = QLineEdit()
-        self.released_since_edit.setPlaceholderText("YYYY-MM-DD (blank = any)")
+        self.released_since_edit.setPlaceholderText("YYYY-MM-DD")
         self.released_since_edit.setClearButtonEnabled(True)
         self.released_since_edit.setFixedWidth(180)
         self.released_since_edit.setToolTip(
-            "Only genomes released on/after this date. Format: YYYY-MM-DD."
+            "only genomes released on/after this date, blank = any"
         )
         opts_row2.addWidget(self.released_since_edit)
         opts_row2.addStretch(1)
@@ -385,7 +384,7 @@ class MainWindow(QMainWindow):
         )
         self.gene_name_edit = QLineEdit()
         self.gene_name_edit.setPlaceholderText(
-            "gene name(s), comma-separated"
+            "comma-separated gene names"
         )
         self.gene_name_edit.setClearButtonEnabled(True)
         self.gene_name_edit.setCompleter(self._gene_completer)
@@ -524,14 +523,14 @@ class MainWindow(QMainWindow):
         )
         self.coverage_btn.setEnabled(any_checked)
         self.coverage_btn.setToolTip(
-            "" if any_checked
+            "selected sequences only" if any_checked
             else "Select gene(s) to plot genome coverage"
         )
         self.conservation_btn.setEnabled(
             any_checked and self._taxid is not None and not downloading
         )
         self.conservation_btn.setToolTip(
-            "Align each selected gene's downloaded isolates and plot conservation"
+            "downloaded AND selected genes only"
             if any_checked
             else "Select gene(s) to plot conservation"
         )
@@ -546,6 +545,7 @@ class MainWindow(QMainWindow):
             self._on_error("input", "Released since must be YYYY-MM-DD (or blank)")
             return
         self._taxid = None
+        self.saved_ranges.clear()
         self.resolved_label.setText("")
         self.resolved_label.setStyleSheet("")
         self.count_label.setText("Searching…")
@@ -724,7 +724,7 @@ class MainWindow(QMainWindow):
             return
         if self._coverage_dialog is not None:
             self._coverage_dialog.close()
-        self._coverage_dialog = CoverageDialog(selected, self)
+        self._coverage_dialog = CoverageDialog(selected, self.saved_ranges, self)
         self._coverage_dialog.show()
         self._coverage_dialog.raise_()
         self._coverage_dialog.activateWindow()
@@ -768,7 +768,7 @@ class MainWindow(QMainWindow):
         )
         if self._conservation_dialog is not None:
             self._conservation_dialog.close()
-        self._conservation_dialog = ConservationDialog(jobs, mafft, x_bounds, self)
+        self._conservation_dialog = ConservationDialog(jobs, mafft, x_bounds, self.saved_ranges, self)
         self._conservation_dialog.show()
         self._conservation_dialog.raise_()
         self._conservation_dialog.activateWindow()

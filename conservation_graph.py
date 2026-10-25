@@ -12,7 +12,7 @@ The score is in range [0, 1] where 1 = every isolate agrees on a base and 0 = ma
 
 Columns are projected onto a reference sequence and placed at that reference's genome positions
 
-Handles negative-strand genes.
+Handles negative-strand genes(?)
 """
 
 import os
@@ -40,7 +40,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from coverage_graph import _smooth
+from coverage_graph import MOUSE_HELP, RangePanel, RangeStore, RangeViewBox, _smooth
 
 MAX_SEQS = 100          # seqs per gene cap for faster MSA, if exceded pick out of all seqs n = MAX_SEQS randomly
 MIN_SEQS = 3            # fewer than this can't show conservation
@@ -49,35 +49,32 @@ DEFAULT_WINDOW = 100
 MIN_WINDOW = 10
 MAX_WINDOW = 500
 
-# Colours cycled across gene tracks
+# Colors to cycle through
 PALETTE = ["#4aa3ff", "#ff6b6b", "#5fd35f", "#ffd93d", "#a06cd5", "#ff8c42", "#2ec4b6", "#e84393", "#5c7cfa", "#f6c453", "#20c997", "#d6336c", "#845ef7", "#74c0fc", "#ff922b", "#38d9a9"]
 
 
 def locate_mafft() -> list[str] | None:
     """
     Return a command prefix for MAFFT, or None if it can't be found.
-    Only checks PATH and the folder containing this script.
+    Checks PATH, then the portable package for this OS next to this script
+    (mafft-win / mafft-mac / mafft-linux64), optionally inside a mafft/ folder.
 
-    TODO: test for mac and linux
+    Every portable package launches via mafft.bat: a batch file on Windows, a shell script on mac/linux
     """
-    found = shutil.which("mafft")
-    if found:
-        return ["cmd", "/c", found] if found.lower().endswith(".bat") else [found]
-
+    sub = {"win32": "mafft-win", "darwin": "mafft-mac"}.get(sys.platform, "mafft-linux64")
     here = Path(__file__).resolve().parent
-
-    candidates = [
-        here / "mafft.bat",
-        here / "mafft" / "mafft.bat",
-        here / "mafft-win" / "mafft.bat",
-        here / "mafft" / "mafft-win" / "mafft.bat",
-        here / "mafft" / "mafft-mac" / "mafft.bat",
+    candidates = [shutil.which("mafft")] + [
+        base / name
+        for base in (here, here / "mafft")
+        for name in (Path(sub) / "mafft.bat", Path("mafft.bat"))
     ]
     for cand in candidates:
-        if cand.is_file():
-            if cand.suffix.lower() == ".bat":
+        if cand and Path(cand).is_file():
+            if not str(cand).lower().endswith(".bat"):
+                return [str(cand)]
+            if sys.platform == "win32":
                 return ["cmd", "/c", str(cand)]
-            return [str(cand)]
+            return ["/bin/sh", str(cand)]
 
     return None
 
@@ -259,18 +256,19 @@ class ConservationDialog(QDialog):
         jobs: list,
         mafft_cmd: list[str],
         x_bounds: tuple[int, int],
+        store: RangeStore,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Sequence conservation")
         self.resize(960, 560)
         self._jobs = list(jobs)
+        self._store = store
         # name -> (x, raw_score, sampled, total)
         self._raw: dict[str, tuple[np.ndarray, np.ndarray, int, int]] = {}
         # name -> (x, smoothed_y)
         self._smoothed: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._items: dict[str, pg.PlotDataItem] = {}
-        self._frozen = False
         self._x_lo = float(x_bounds[0])
         self._x_hi = float(x_bounds[1])
         self._build_ui()
@@ -301,7 +299,7 @@ class ConservationDialog(QDialog):
 
         body = QHBoxLayout()
         pg.setConfigOptions(antialias=True)
-        self.plot = pg.PlotWidget()
+        self.plot = pg.PlotWidget(viewBox=RangeViewBox(self._store))
         self.plot.setBackground(None)
         self.plot.setLabel("bottom", "Genome position (bp)")
         self.plot.setLabel("left", "Conservation (1 = identical)")
@@ -322,8 +320,7 @@ class ConservationDialog(QDialog):
         panel_v = QVBoxLayout(panel)
         panel_v.setContentsMargins(0, 0, 0, 0)
         self.readout = QLabel(
-            "Hover over a track to read its conservation.\n"
-            "Click the plot to freeze the readout, click again to resume"
+            "Hover over a track to read its conservation.\n\n" + MOUSE_HELP
         )
         self.readout.setAlignment(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
@@ -332,15 +329,16 @@ class ConservationDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(self.readout)
-        scroll.setFixedWidth(240)
-        panel_v.addWidget(scroll)
+        panel_v.addWidget(scroll, 3)
+        self.ranges = RangePanel(self._store, self.plot)
+        panel_v.addWidget(self.ranges, 2)
+        panel.setFixedWidth(240)
         body.addWidget(panel)
         outer.addLayout(body)
 
         self._proxy = pg.SignalProxy(
             self.plot.scene().sigMouseMoved, rateLimit=30, slot=self._on_mouse_moved
         )
-        self.plot.scene().sigMouseClicked.connect(self._on_click)
 
     def _start_worker(self, mafft_cmd: list[str]) -> None:
         self._thread = QThread(self)
@@ -395,19 +393,7 @@ class ConservationDialog(QDialog):
             self.plot.setXRange(self._x_lo, self._x_hi, padding=0.02)
             self.plot.setYRange(0, 1, padding=0)
 
-    def _on_click(self, event) -> None:
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-        self._frozen = not self._frozen
-        self.setWindowTitle(
-            "Sequence conservation - FROZEN (click to resume)"
-            if self._frozen
-            else "Sequence conservation"
-        )
-
     def _on_mouse_moved(self, event) -> None:
-        if self._frozen:
-            return
         scene_pos = event[0]
         if not self.plot.sceneBoundingRect().contains(scene_pos):
             return
@@ -432,6 +418,7 @@ class ConservationDialog(QDialog):
         self.readout.setText("\n".join(lines))
 
     def closeEvent(self, event) -> None:
+        self.ranges.detach()
         self._worker.cancel()
         self._thread.quit()
         self._thread.wait(3000)

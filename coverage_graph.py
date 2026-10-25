@@ -4,17 +4,20 @@ Genome-coverage graph for selected genes
 Coverage depth at a genome position = how many of the selected CDS regions span that base
 The curve is smoothed with a moving average (adjustable)
 Hovering over graphshows which genes cover the position under the cursor
-Click the plot to freeze the readout so the gene list can be scrolled
+Left-drag saves a coordinate range (left-click a single position), right-drag pans, wheel zooms
 """
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QDialog,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -48,17 +51,143 @@ def _smooth(cov: np.ndarray, window: int) -> np.ndarray:
     return numerator / denominator
 
 
+MOUSE_HELP = "Left-drag: save range · click: save position\nRight-drag: pan · wheel: zoom"
+
+
+class RangeStore(QObject):
+    """
+    Saved genome coordinate ranges, 1-based inclusive (lo, hi), kept sorted
+    One instance is shared by every graph window, so both graphs show the same list
+    """
+    changed = pyqtSignal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ranges: list[tuple[int, int]] = []
+
+    def add(self, a: float, b: float) -> None:
+        lo, hi = sorted((int(round(a)), int(round(b))))
+        if (lo, hi) not in self.ranges:
+            self.ranges = sorted(self.ranges + [(lo, hi)])
+            self.changed.emit()
+
+    def remove(self, indices: list[int]) -> None:
+        drop = set(indices)
+        self.ranges = [r for i, r in enumerate(self.ranges) if i not in drop]
+        self.changed.emit()
+
+    def clear(self) -> None:
+        self.ranges = []
+        self.changed.emit()
+
+
+class RangeViewBox(pg.ViewBox):
+    """
+    Replaces pyqtgraph's default mouse mapping (left-drag pan, right-drag zoom):
+    left-drag selects an x-range saved on release, left-click saves one position,
+    right-drag pans, wheel still zooms. Drags on the axes keep the default behaviour
+    """
+
+    def __init__(self, store: RangeStore) -> None:
+        super().__init__()
+        self._store = store
+        self._preview = pg.LinearRegionItem(movable=False, brush=pg.mkBrush(74, 163, 255, 60))
+        self._preview.setZValue(10)
+        self._preview.hide()
+        self.addItem(self._preview, ignoreBounds=True)
+
+    def _x(self, scene_pos) -> float:
+        lo, hi = self.viewRange()[0]
+        return min(max(self.mapSceneToView(scene_pos).x(), lo), hi)
+
+    def mouseDragEvent(self, ev, axis=None) -> None:
+        if axis is not None:
+            return super().mouseDragEvent(ev, axis)
+        if ev.button() == Qt.MouseButton.LeftButton:
+            ev.accept()
+            a, b = self._x(ev.buttonDownScenePos()), self._x(ev.scenePos())
+            self._preview.setRegion((a, b))
+            self._preview.show()
+            if ev.isFinish():
+                self._preview.hide()
+                self._store.add(a, b)
+        elif ev.button() == Qt.MouseButton.RightButton:
+            ev.accept()
+            d = self.mapSceneToView(ev.lastScenePos()) - self.mapSceneToView(ev.scenePos())
+            self.translateBy(x=d.x(), y=d.y())
+        else:
+            super().mouseDragEvent(ev, axis)
+
+    def mouseClickEvent(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.LeftButton:
+            ev.accept()
+            x = self._x(ev.scenePos())
+            self._store.add(x, x)
+        else:
+            super().mouseClickEvent(ev)
+
+
+class RangePanel(QWidget):
+    """
+    Saved-range list for the side panel, plus the matching bands on the plot
+    Call detach() when the owning window closes so the shared store drops it
+    """
+
+    def __init__(self, store: RangeStore, plot: pg.PlotWidget) -> None:
+        super().__init__()
+        self._store = store
+        self._plot = plot
+        self._bands: list[pg.LinearRegionItem] = []
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(QLabel("Saved ranges:"))
+        self.list = QListWidget()
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        v.addWidget(self.list)
+        self.remove_btn = QPushButton("Remove selected")
+        self.remove_btn.clicked.connect(self._remove_selected)
+        v.addWidget(self.remove_btn)
+        # Delete on Windows/Linux; the Mac "delete" key sends Backspace
+        for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
+            sc = QShortcut(key, self.list)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._remove_selected)
+        store.changed.connect(self._refresh)
+        self._refresh()
+
+    def detach(self) -> None:
+        self._store.changed.disconnect(self._refresh)
+
+    def _remove_selected(self) -> None:
+        rows = [self.list.row(item) for item in self.list.selectedItems()]
+        if rows:
+            self._store.remove(rows)
+
+    def _refresh(self) -> None:
+        self.list.clear()
+        for lo, hi in self._store.ranges:
+            self.list.addItem(f"{lo:,} – {hi:,}  ({hi - lo + 1:,} bp)")
+        for band in self._bands:
+            self._plot.removeItem(band)
+        self._bands = []
+        for lo, hi in self._store.ranges:
+            band = pg.LinearRegionItem((lo, hi), movable=False, brush=pg.mkBrush(255, 200, 0, 45))
+            self._plot.addItem(band, ignoreBounds=True)
+            self._bands.append(band)
+        self.remove_btn.setEnabled(bool(self._store.ranges))
+
+
 class CoverageDialog(QDialog):
     """
     Modeless window plotting smoothed coverage with a hover readout
     """
 
-    def __init__(self, rows: list[GeneRow], parent=None) -> None:
+    def __init__(self, rows: list[GeneRow], store: RangeStore, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Genome coverage")
         self.resize(900, 540)
         self._rows = list(rows)
-        self._frozen = False
+        self._store = store
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             self._prepare_data()
@@ -125,7 +254,7 @@ class CoverageDialog(QDialog):
 
         body = QHBoxLayout()
         pg.setConfigOptions(antialias=False)
-        self.plot = pg.PlotWidget()
+        self.plot = pg.PlotWidget(viewBox=RangeViewBox(self._store))
         self.plot.setBackground(None)
         self.plot.setLabel("bottom", "Genome position (bp)")
         self.plot.setLabel("left", "Coverage depth (genomes)")
@@ -154,8 +283,8 @@ class CoverageDialog(QDialog):
         panel_v = QVBoxLayout(panel)
         panel_v.setContentsMargins(0, 0, 0, 0)
         self.readout = QLabel(
-            "Hover over the curve to list the genes covering that position.\n"
-            "Click the plot to freeze the readout, click again to resume"
+            "Hover over the curve to list the genes covering that position.\n\n"
+            + MOUSE_HELP
         )
         self.readout.setAlignment(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
@@ -164,8 +293,10 @@ class CoverageDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(self.readout)
-        scroll.setFixedWidth(240)
-        panel_v.addWidget(scroll)
+        panel_v.addWidget(scroll, 3)
+        self.ranges = RangePanel(self._store, self.plot)
+        panel_v.addWidget(self.ranges, 2)
+        panel.setFixedWidth(240)
         body.addWidget(panel)
 
         outer.addLayout(body)
@@ -175,7 +306,10 @@ class CoverageDialog(QDialog):
             rateLimit=30,
             slot=self._on_mouse_moved,
         )
-        self.plot.scene().sigMouseClicked.connect(self._on_click)
+
+    def closeEvent(self, event) -> None:
+        self.ranges.detach()
+        super().closeEvent(event)
 
     def _reset_view(self) -> None:
         if self._hi > self._lo:
@@ -201,19 +335,7 @@ class CoverageDialog(QDialog):
         order = np.argsort(counts)[::-1]
         return [(self._names[i], int(counts[i])) for i in order if counts[i] > 0]
 
-    def _on_click(self, event) -> None:
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-        self._frozen = not self._frozen
-        self.setWindowTitle(
-            "Genome coverage - FROZEN (click to resume)"
-            if self._frozen
-            else "Genome coverage"
-        )
-
     def _on_mouse_moved(self, event) -> None:
-        if self._frozen:
-            return
         scene_pos = event[0]
         if not self.plot.sceneBoundingRect().contains(scene_pos):
             return
